@@ -7,37 +7,44 @@ using System.Text;
 using System.Threading.Tasks;
 using LibreHardwareMonitor.Hardware;
 
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.Threading;
+
 namespace HWStatsService
 {
 	class Program
 	{
 		private static HttpListener listener;
-		private static string url = "http://*:8000/";
+		private static readonly string url = "http://*:8000/";
 
 		private static Computer computer;
 
+		[STAThread]
 		static void Main(string[] args)
 		{
-			computer = new Computer();
-			
-			computer.IsCpuEnabled = true;
-			computer.IsGpuEnabled = true;
-			computer.IsMemoryEnabled = true;
-			computer.IsMotherboardEnabled = true;
-			computer.IsControllerEnabled = true;
-			computer.IsNetworkEnabled = true;
-			computer.IsStorageEnabled = true;
-			
+			computer = new Computer
+			{
+				IsCpuEnabled = true,
+				IsGpuEnabled = true,
+				IsMemoryEnabled = true,
+				IsMotherboardEnabled = true,
+				IsControllerEnabled = true,
+				IsNetworkEnabled = true,
+				IsStorageEnabled = true
+			};
+
 			computer.Open();
 			computer.Accept(new UpdateVisitor());
 
 			listener = new HttpListener();
 			listener.Prefixes.Add(url);
 			listener.Start();
+
 #if DEBUG
 			Console.WriteLine("Listening for connections on {0}", url);
 #endif
-			
+
 			Task listenTask = HandleIncomingConnections();
 			listenTask.GetAwaiter().GetResult();
 
@@ -66,7 +73,8 @@ namespace HWStatsService
 				Console.WriteLine(req.Url.AbsolutePath);
 				Console.WriteLine("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=");
 #endif
-				if(req.Url.AbsolutePath == "/help" || req.Url.AbsolutePath == "/")
+				computer.Accept(new UpdateVisitor());
+				if (req.Url.AbsolutePath == "/help" || req.Url.AbsolutePath == "/")
 				{
 					string helpHTML = "Hardware types:<br />";
 					foreach (HardwareType hwt in Enum.GetValues(typeof(HardwareType)))
@@ -94,8 +102,9 @@ namespace HWStatsService
 					await resp.OutputStream.WriteAsync(data, 0, data.Length);
 					resp.Close();
 
+#if DEBUG
 					Console.WriteLine("HELP CALLED");
-					Console.WriteLine("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=");
+#endif
 					continue;
 				} else if (req.Url.AbsolutePath == "/quit")
 				{
@@ -109,7 +118,18 @@ namespace HWStatsService
 					resp.Close();
 					break;
 				}
+				else if (req.Url.AbsolutePath == "/monitor")
+				{
+					data = Encoding.UTF8.GetBytes(MonitorData());
 
+					resp.ContentType = "text/html";
+					resp.ContentEncoding = Encoding.UTF8;
+					resp.ContentLength64 = data.LongLength;
+
+					await resp.OutputStream.WriteAsync(data, 0, data.Length);
+					resp.Close();
+					continue;
+				}
 
 				string[] request = req.Url.AbsolutePath.Split(
 					new char[1] { '/' }, StringSplitOptions.RemoveEmptyEntries
@@ -203,6 +223,60 @@ namespace HWStatsService
 					sensors.AddRange(GetValues(h, filter));
 
 			return sensors;
+		}
+
+		static string MonitorData()
+		{
+			IHardware cpu = computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
+			float tempCPU = 0;
+			var lst = cpu.Sensors.Where(ss => ss.SensorType == SensorType.Temperature);
+			if (lst.Count() > 0)
+				tempCPU = lst.Max(ss => ss.Value.Value);
+
+			IHardware gpu = computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.GpuNvidia);
+			float tempGPU = 0;
+			lst = gpu.Sensors.Where(ss => ss.SensorType == SensorType.Temperature);
+			if (lst.Count() > 0)
+				tempGPU = lst.Max(ss => ss.Value.Value);
+
+			IHardware mth = computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Motherboard);
+			if(mth.SubHardware.Length > 0)
+				mth = mth.SubHardware.FirstOrDefault(h => h.HardwareType == HardwareType.SuperIO);
+			float tempMTH = 0;
+			lst = mth.Sensors.Where(ss => ss.SensorType == SensorType.Temperature);
+			if (lst.Count() > 0)
+				tempMTH = lst.Max(ss => ss.Value.Value);
+
+			IHardware ssd = computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Storage);
+			float tempSSD = 0;
+			lst = ssd.Sensors.Where(ss => ss.SensorType == SensorType.Temperature);
+			if (lst.Count() > 0)
+				tempSSD = lst.Max(ss => ss.Value.Value);
+
+			//foreach (var h in computer.Hardware)
+			//	DisplayALL(h);
+			//return "";
+
+			return string.Format("{0:00};{1:00};{2:00};{3:00};{4:00}:{5:00}:{6:00}",
+				Math.Round(tempCPU).ToString(CultureInfo.InvariantCulture), Math.Round(tempGPU).ToString(CultureInfo.InvariantCulture),
+				Math.Round(tempMTH).ToString(CultureInfo.InvariantCulture), Math.Round(tempSSD).ToString(CultureInfo.InvariantCulture),
+				DateTime.Now.Hour, DateTime.Now.Minute, DateTime.Now.Second
+			);
+		}
+
+		static void DisplayALL(IHardware hw, string tab = "")
+		{
+			Console.WriteLine(tab + hw.Name);
+			if (hw.Sensors.Length > 0)
+				foreach (var s in hw.Sensors)
+					if(s.Value != null)
+						Console.WriteLine(tab + "\t> " + s.Name + " = " + s.Value.Value.ToString(CultureInfo.InvariantCulture));
+					else
+						Console.WriteLine(tab + "\t> " + s.Name + " = NULL");
+
+			if (hw.SubHardware.Length > 0)
+				foreach (var h in hw.SubHardware)
+					DisplayALL(h, "\t");
 		}
 	}
 
